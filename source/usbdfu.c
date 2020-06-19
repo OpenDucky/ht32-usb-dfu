@@ -27,11 +27,11 @@ static const USBDescriptor dfu_device_descriptor = {
 
 
 /* Configuration Descriptor tree for a DFU.*/
-static const uint8_t dfu_configuration_descriptor_data[25] = {
+static const uint8_t dfu_configuration_descriptor_data[27] = {
   /* Configuration Descriptor.*/
-  USB_DESC_CONFIGURATION(25,            /* wTotalLength.                    */
+  USB_DESC_CONFIGURATION(27,            /* wTotalLength.                    */
                          0x01,          /* bNumInterfaces.                  */
-                         0x01,          /* bConfigurationValue.             */
+                         0x00,          /* bConfigurationValue.             */
                          0,             /* iConfiguration.                  */
                          0xC0,          /* bmAttributes (self powered).     */
                          50),           /* bMaxPower (100mA).               */
@@ -49,7 +49,7 @@ static const uint8_t dfu_configuration_descriptor_data[25] = {
   USB_DESC_BYTE         (0x21),         /* bDescriptorType (DFU_FCUNTION).  */
   USB_DESC_BYTE         (0b0010),       /* bmAttributes (DETACH | DOWNLOAD) */
   USB_DESC_WORD         (   500),       /* Timeout.                         */
-  USB_DESC_WORD         (512  ),
+  USB_DESC_WORD         (64  ),
   USB_DESC_BCD          (0x0110)
 };
 
@@ -132,13 +132,19 @@ static void sof_handler(USBDriver *usbp) {
   (void)usbp;
 }
 
-#define MAX_FLASH_ADDR 0x10000
-static uint32_t currentAddress = 0x0;
+uint32_t currentAddress = 0x0;
+uint8_t flashBuffer[FLASH_PAGE_SIZE]; // Flash Buffer
+size_t flashBufferPointer = 0;
 enum dfu_state currentState = STATE_DFU_IDLE;
+static enum {
+  LASTOP_IDLE, 
+  LASTOP_DNLOAD,
+  LASTOP_UPLOAD
+} lastOperation;
 
 static uint8_t status_response_buffer[6] = {
     DFU_STATUS_OK, // Status (0)
-    0xe8, 0x03, 0x00,
+    100, 0x00, 0x00,
     0x00, // Next State (4)
     0
 };
@@ -149,6 +155,9 @@ static bool request_handler(USBDriver *usbp) {
         uint16_t block_cnt = (((uint16_t)usbp->setup[4]) << 8) | usbp->setup[3];
         switch (usbp->setup[1]) {
             case DFU_GETSTATUS:
+                if (currentState == STATE_DFU_DNLOAD_SYNC) {
+                  currentState = STATE_DFU_DNBUSY;
+                }
                 status_response_buffer[4] = currentState;
                 usbSetupTransfer(usbp, (uint8_t *)status_response_buffer, 6, NULL);
                 return true;
@@ -156,15 +165,39 @@ static bool request_handler(USBDriver *usbp) {
                 usbSetupTransfer(usbp, (uint8_t *)&currentState, 1, NULL);
                 return true;
             case DFU_UPLOAD:
+                if (lastOperation != LASTOP_UPLOAD) {
+                  lastOperation = LASTOP_UPLOAD;
+                  currentAddress = 0;
+                }
                 if ((currentAddress + transfer_size) > MAX_FLASH_ADDR) {
                     transfer_size = MAX_FLASH_ADDR - currentAddress;
                     usbSetupTransfer(usbp, (uint8_t *)currentAddress, transfer_size, NULL);
-                    currentAddress = 0;
+                    lastOperation = LASTOP_IDLE;
+                    currentState = STATE_DFU_IDLE;
                 } else {
                     usbSetupTransfer(usbp, (uint8_t *)currentAddress, transfer_size, NULL);
                     currentAddress += transfer_size;
+                    currentState = STATE_DFU_UPLOAD_IDLE;
                 }
                 return true;
+            case DFU_ABORT:
+              lastOperation = LASTOP_IDLE;
+              currentState = STATE_DFU_IDLE;
+              return true;
+            case DFU_DNLOAD:
+              if (lastOperation != LASTOP_DNLOAD) {
+                lastOperation = LASTOP_DNLOAD;
+                currentAddress = APP_BASE;
+              }
+              if (transfer_size) {
+                usbSetupTransfer(usbp, (uint8_t *)flashBuffer, transfer_size, NULL);
+                flashBufferPointer = transfer_size;
+                currentState = STATE_DFU_DNLOAD_SYNC;
+              } else {
+                currentState = STATE_DFU_MANIFEST_WAIT_RESET;
+                lastOperation = LASTOP_IDLE;
+              }
+              return true;
         }
     }
     return false;

@@ -21,6 +21,8 @@
 #include "mbi5042.h"
 #include "usbdfu.h"
 
+#define CM3_RESET_VECTOR_OFFSET    4
+
 uint16_t led_matrix_data [8*16] = {
     0x7FF,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
@@ -44,6 +46,68 @@ static PWMConfig pwmcfg = {
    {PWM_OUTPUT_DISABLED, NULL}              /* CH3 mode and callback.         */
   }
 };
+
+static void jump_to_application(void) __attribute__ ((noreturn));
+
+static void jump_to_application(void) {
+
+    /* Use the application's vector table */
+    *((volatile uint32_t*)0xe000ed08) = APP_BASE;
+
+    /* Initialize the application's stack pointer */
+    __set_MSP(*((volatile uint32_t*)(APP_BASE)));
+    uint32_t target_start = *((volatile uint32_t*)(APP_BASE + CM3_RESET_VECTOR_OFFSET));
+    /* Jump to the application entry point */
+    __ASM volatile ("bx %0" : : "r" (target_start) : );
+
+    
+    while (1);
+}
+
+
+THD_WORKING_AREA(waThread2, 256);
+THD_FUNCTION(Thread2, arg) {
+  (void)arg;
+  led_matrix_data[1]=  0xFFFF;
+  while (1)
+  {
+    if (currentState != STATE_DFU_DNBUSY) {
+      chThdSleepMilliseconds(1);
+    } else {
+      led_matrix_data[2]=  0xFFFF;
+      chThdSleepMilliseconds(1);
+      for (size_t i = 0; i < flashBufferPointer; i+=sizeof(uint32_t))
+      {
+        if (currentAddress % FLASH_PAGE_SIZE == 0) {
+          // Issue Page Erase
+          while (((FMC->OPCR & FMC_OPCR_OPM_MASK) != FMC_OPCR_OPM_IDLE) && ((FMC->OPCR & FMC_OPCR_OPM_MASK) != FMC_OPCR_OPM_FINISHED)){
+            chThdSleepMilliseconds(1);
+          }
+          FMC->TADR = currentAddress;
+          FMC->OCMR = FMC_OCMR_CMD_PAGE_ERASE;
+          FMC->OPCR = FMC_OPCR_OPM_COMMIT;
+          while ((FMC->OPCR & FMC_OPCR_OPM_MASK) != FMC_OPCR_OPM_FINISHED){
+            chThdSleepMilliseconds(1);
+          }
+        }
+        while (((FMC->OPCR & FMC_OPCR_OPM_MASK) != FMC_OPCR_OPM_IDLE) && ((FMC->OPCR & FMC_OPCR_OPM_MASK) != FMC_OPCR_OPM_FINISHED)){
+            chThdSleepMilliseconds(1);
+        }
+        FMC->TADR = currentAddress;
+        FMC->WRDR = flashBuffer[i] | ((uint32_t)flashBuffer[i+1]) << 8 | ((uint32_t)flashBuffer[i+2]) << 16 | ((uint32_t)flashBuffer[i+3]) << 24;
+        FMC->OCMR = FMC_OCMR_CMD_WORD_PROGRAM;
+        FMC->OPCR = FMC_OPCR_OPM_COMMIT;
+        while ((FMC->OPCR & FMC_OPCR_OPM_MASK) != FMC_OPCR_OPM_FINISHED){
+            chThdSleepMilliseconds(1);
+        }
+        currentAddress += sizeof(uint32_t);
+      }
+      currentState = STATE_DFU_DNLOAD_IDLE;
+    }
+  }
+  led_matrix_data[1]=  0x00;
+}
+
 /*
  * Thread 1.
  */
@@ -85,7 +149,6 @@ THD_FUNCTION(Thread1, arg) {
   }
 }
 
-
 /*
  * Application entry point.
  */
@@ -99,7 +162,35 @@ int main(void) {
    */
   halInit();
   chSysInit();
+
+  
+  palClearLine(LINE_ROW1);
+  palSetLine(LINE_ROW2);
+  palSetLine(LINE_ROW3);
+  palSetLine(LINE_ROW4);
+  palSetLine(LINE_ROW5);
+  palSetLine(LINE_ROW6);
+  palSetLine(LINE_ROW7);
+  palSetLine(LINE_ROW8);
+  palSetLine(LINE_ROW9);
+  palSetLine(LINE_ROW10);
+  palSetLine(LINE_ROW11);
+  palSetLine(LINE_ROW12);
+  palSetLine(LINE_ROW13);
+  palSetLine(LINE_ROW14);
+  palSetLine(LINE_ROW15);
+  __NOP(); __NOP(); __NOP(); __NOP(); __NOP();
+  if (!palReadLine(LINE_COL1)) {
+    goto force_bootloader;
+  }
+
+  if (*((volatile uint32_t*)APP_BASE) != 0xFFFFFFFF) {
+    jump_to_application();
+  }
+
+force_bootloader:
   chThdCreateStatic(waThread1, sizeof(waThread1), NORMALPRIO, Thread1, NULL);
+  chThdCreateStatic(waThread2, sizeof(waThread2), NORMALPRIO, Thread2, NULL);
   
   /* This is now the idle thread loop, you may perform here a low priority
      task but you must never try to sleep or wait in this loop. Note that
