@@ -49,7 +49,7 @@ static const uint8_t dfu_configuration_descriptor_data[27] = {
   USB_DESC_BYTE         (0x21),         /* bDescriptorType (DFU_FCUNTION).  */
   USB_DESC_BYTE         (0b0010),       /* bmAttributes (DETACH | DOWNLOAD) */
   USB_DESC_WORD         (   500),       /* Timeout.                         */
-  USB_DESC_WORD         (64  ),
+  USB_DESC_WORD         (512  ),
   USB_DESC_BCD          (0x0110)
 };
 
@@ -144,7 +144,7 @@ static enum {
 
 static uint8_t status_response_buffer[6] = {
     DFU_STATUS_OK, // Status (0)
-    100, 0x00, 0x00,
+    1, 0x00, 0x00,
     0x00, // Next State (4)
     0
 };
